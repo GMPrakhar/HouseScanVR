@@ -70,8 +70,36 @@ fi
 
 if [[ $STATUS -ne 0 ]]; then
     echo >&2
-    echo "ERROR: build failed (exit $STATUS). Last errors from the log:" >&2
-    grep -E "error CS|BuildFailedException|Error building|^Error" "$LOG" | tail -30 >&2 || true
+    echo "ERROR: build failed (exit $STATUS)." >&2
+
+    # Unity reports almost every build failure as "Scripts have compiler errors",
+    # including out-of-memory and process-limit failures that have nothing to do
+    # with the code. Surface the real cause first.
+    if grep -q "Out of memory" "$LOG"; then
+        echo >&2
+        echo "CAUSE: a build process ran out of memory." >&2
+        echo "  Free some RAM and retry. Unity leaves Roslyn compiler servers" >&2
+        echo "  (VBCSCompiler) running between builds; they can hold several GB." >&2
+    fi
+    if grep -qE "pthread_create failed \(EAGAIN\)|posix_spawn failed|Resource temporarily unavailable" "$LOG"; then
+        echo >&2
+        echo "CAUSE: the process/thread limit was exhausted." >&2
+        echo "  Lower BEE_BUILD_THREADS (try 1), and check your shell's cgroup:" >&2
+        echo "    cat /sys/fs/cgroup/\$(cut -d: -f3 /proc/self/cgroup)/pids.{current,max}" >&2
+        echo "  Assets/Plugins/Android/gradleTemplate.properties already forces" >&2
+        echo "  Gradle to run serially without a daemon." >&2
+    fi
+    if grep -q "Android JNI" "$LOG"; then
+        echo >&2
+        echo "CAUSE: the built-in Android JNI module is disabled." >&2
+        echo "  Add \"com.unity.modules.androidjni\": \"1.0.0\" to Packages/manifest.json." >&2
+    fi
+
+    echo >&2
+    echo "Errors from the log:" >&2
+    grep -E "error CS|BuildFailedException|CommandInvokationFailure|Out of memory|EAGAIN|posix_spawn|^Error" "$LOG" \
+        | sort -u | tail -20 >&2 || true
+    echo >&2
     echo "Full log: $LOG" >&2
     exit $STATUS
 fi

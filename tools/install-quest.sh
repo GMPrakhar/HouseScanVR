@@ -14,16 +14,40 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE="com.gmprakhar.housescanvr"
 APK="${APK:-$PROJECT_DIR/Build/Quest/HouseScanVR.apk}"
 SCAN="${1:-}"
+UNITY_VERSION="${UNITY_VERSION:-6000.0.81f1}"
 
-if ! command -v adb >/dev/null 2>&1; then
+# Prefer a system adb, but fall back to the one Unity's Android module ships,
+# which is present on any machine that can build this APK.
+find_adb() {
+    if [[ -n "${ADB:-}" ]]; then echo "$ADB"; return 0; fi
+    if command -v adb >/dev/null 2>&1; then command -v adb; return 0; fi
+    local roots=(
+        "${UNITY:+$(dirname "$UNITY")/Data}"
+        "$HOME/unity/editor/$UNITY_VERSION/Editor/Data"
+        "$HOME/Unity/Hub/Editor/$UNITY_VERSION/Editor/Data"
+        "/opt/unity/editor/$UNITY_VERSION/Editor/Data"
+        "/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents"
+    )
+    for r in "${roots[@]}"; do
+        [[ -z "$r" ]] && continue
+        local c="$r/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb"
+        [[ -x "$c" ]] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+if ! ADB_BIN="$(find_adb)"; then
     echo "ERROR: adb not found on PATH." >&2
     echo "Install Android platform-tools:" >&2
     echo "  Linux  : sudo apt install android-sdk-platform-tools" >&2
     echo "  macOS  : brew install --cask android-platform-tools" >&2
     echo "  Windows: https://developer.android.com/tools/releases/platform-tools" >&2
-    echo "Unity also ships one at <Unity>/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb" >&2
+    echo "Unity also ships one at" >&2
+    echo "  <Unity>/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb" >&2
+    echo "Set ADB=/path/to/adb to point at it directly." >&2
     exit 1
 fi
+adb() { "$ADB_BIN" "$@"; }
 
 if [[ ! -f "$APK" ]]; then
     echo "ERROR: APK not found: $APK" >&2

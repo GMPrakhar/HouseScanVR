@@ -86,15 +86,28 @@ namespace GaussianSplatting.Runtime
 
         public bool Valid => m_Valid;
 
+        /// <summary>
+        /// ComputeShader.FindKernel *throws* when a kernel is absent rather than
+        /// returning -1, so the m_Valid checks below could never actually run.
+        /// This happens whenever the compute shader has no compiled variant for
+        /// the current device — including the editor under -nographics, which
+        /// makes every headless player build log a spurious ArgumentException.
+        /// HasKernel is the non-throwing query.
+        /// </summary>
+        static int FindKernelOrMinusOne(ComputeShader cs, string name)
+        {
+            return cs.HasKernel(name) ? cs.FindKernel(name) : -1;
+        }
+
         public GpuSorting(ComputeShader cs)
         {
             m_CS = cs;
             if (cs)
             {
-                m_kernelInitDeviceRadixSort = cs.FindKernel("InitDeviceRadixSort");
-                m_kernelUpsweep = cs.FindKernel("Upsweep");
-                m_kernelScan = cs.FindKernel("Scan");
-                m_kernelDownsweep = cs.FindKernel("Downsweep");
+                m_kernelInitDeviceRadixSort = FindKernelOrMinusOne(cs, "InitDeviceRadixSort");
+                m_kernelUpsweep = FindKernelOrMinusOne(cs, "Upsweep");
+                m_kernelScan = FindKernelOrMinusOne(cs, "Scan");
+                m_kernelDownsweep = FindKernelOrMinusOne(cs, "Downsweep");
             }
 
             m_Valid = m_kernelInitDeviceRadixSort >= 0 &&

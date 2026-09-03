@@ -9,11 +9,15 @@ tools/install-quest.sh path/to/my-house.ply # installs it and copies a scan in
 
 Everything below explains the prerequisites and what to do when a step fails.
 
-> **Not verified on hardware.** The APK could not be built or run in the
-> environment this project was developed in (no Android module, no adb, no
-> headset). The desktop rendering, level analysis and stereo rendering *are*
-> verified — see [README.md](README.md). Treat the Quest path as reviewed and
-> configured, but unproven, and expect to iterate on frame rate.
+> **Status: the APK builds and is structurally verified; it has not run on a
+> headset.** It was built on Linux and checked with `aapt2`/`apksigner`:
+> arm64-v8a, Vulkan, `libopenxr_loader.so`, `com.oculus.intent.category.VR`,
+> `android.hardware.vr.headtracking`, minSdk 32, signature valid, and
+> `supportedDevices` includes `eureka` (Quest 3). Desktop rendering, level
+> analysis and stereo rendering are separately verified — see
+> [README.md](README.md). What remains unproven is **on-device behaviour and
+> frame rate**, because no headset was available. Expect to iterate on the
+> splat budget.
 
 ---
 
@@ -39,8 +43,9 @@ Everything below explains the prerequisites and what to do when a step fails.
 | macOS | `brew install --cask android-platform-tools` |
 | Windows | [platform-tools zip](https://developer.android.com/tools/releases/platform-tools), add to `PATH` |
 
-Unity also ships one at
-`<Unity>/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb`.
+You may not need to install anything: Unity's Android module ships adb at
+`<Unity>/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb`, and
+`install-quest.sh` finds it automatically. Set `ADB=/path/to/adb` to override.
 
 ### Install Unity's Android Build Support
 
@@ -53,6 +58,39 @@ on **6000.0.81f1 → Add Modules**, and tick:
 
 `build-quest.sh` exits with code `2` and this exact remedy if the module is
 missing, so it is safe to just run it and find out.
+
+#### Without Unity Hub (headless Linux)
+
+Unity's release metadata lists the Android target for the *Linux* editor as a
+macOS `.pkg`, which looks like Linux is unsupported. It isn't. A `.pkg` is just
+an xar archive, and Hub only extracts its payload; every sub-component (JDK,
+SDK, NDK) is a real linux-x64 build — the NDK toolchain is literally
+`prebuilt/linux-x86_64`.
+
+If you have no GUI or no Hub, install it directly:
+
+```bash
+tools/install-android-module.py          # ~1.5 GB download, resumable
+```
+
+It reads the same release metadata Hub does, so the result matches a Hub
+install. Requires `7z`, `unzip`, `cpio` and `curl`. Override with
+`UNITY_VERSION` / `UNITY_PATH` if your editor is elsewhere.
+
+This also gives you `adb`, at
+`<Unity>/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/platform-tools/adb`.
+
+#### Enable the Android JNI module
+
+OpenXR's permission code needs Unity's built-in Android JNI module. It is
+already enabled in this project's `Packages/manifest.json`:
+
+```json
+"com.unity.modules.androidjni": "1.0.0"
+```
+
+Without it the build fails with `The name 'Permission' does not exist in the
+current context`, which reads like a code error but is a missing module.
 
 ---
 
@@ -74,8 +112,14 @@ Useful environment variables:
 | `BEE_BUILD_THREADS` | Cap Unity's build workers on pid-constrained machines |
 
 The first build takes several minutes because IL2CPP compiles the whole engine.
-On failure the script prints the compiler errors from the log rather than making
-you dig through it.
+On failure the script diagnoses the cause rather than making you dig through the
+log.
+
+**On constrained or shared machines**, Gradle is the thing most likely to break
+the build: it defaults to a resident daemon and one worker per core, and dies
+with `pthread_create failed (EAGAIN)` long before it runs out of memory.
+`Assets/Plugins/Android/gradleTemplate.properties` forces it to run serially
+without a daemon. If a build still fails this way, use `BEE_BUILD_THREADS=1`.
 
 ### What the build configures
 
@@ -176,3 +220,7 @@ Memory is not the binding constraint: 722k splats is ~163 MB of GPU payload
 | Doubled or misaligned eyes | Render mode reverted to single-pass. Re-run `QuestBuild.ConfigureQuest`. |
 | Low frame rate | Lower `m_MaxSplatsMobile`. |
 | Build exits 2 | Android Build Support not installed — see step 1. |
+| `The name 'Permission' does not exist` | Built-in Android JNI module disabled. Add `com.unity.modules.androidjni` to `Packages/manifest.json`. |
+| `Scripts have compiler errors` with no error listed | Usually not a code error. Unity reports OOM and process-limit failures this way. Check the log for `Out of memory` or `pthread_create failed (EAGAIN)`; `build-quest.sh` now diagnoses both. |
+| `pthread_create failed (EAGAIN)` / `posix_spawn failed` | Process limit exhausted. Set `BEE_BUILD_THREADS=1`, and close other Unity/dotnet processes — Unity leaves Roslyn `VBCSCompiler` servers running between builds. |
+| `Out of memory` during IL post-processing | Same stale `VBCSCompiler` servers, which can hold several GB each. |

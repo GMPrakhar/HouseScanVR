@@ -46,3 +46,8 @@ crashlytics-build.properties
 # OS noise
 .DS_Store
 Thumbs.db
+
+# JVM crash dumps from Gradle/IL2CPP failures
+hs_err_pid*.log
+replay_pid*.log
+.utmp/

@@ -110,6 +110,7 @@ Assets/Editor/RenderProbe.cs           The GPU test harness described above
 Assets/Editor/XrSetup.cs               Mock HMD registration + Windows stereo player
 Assets/Editor/QuestBuild.cs            Quest/OpenXR configuration and APK build
 Assets/Scripts/StereoProbe.cs          Runtime stereo assertions inside a built player
+tools/install-android-module.py        Install Unity's Android module without Hub
 tools/build-quest.sh                   Build the Quest APK
 tools/install-quest.sh                 Sideload the APK and a scan onto a Quest 3
 
@@ -207,12 +208,18 @@ These cost real time to diagnose; do not rediscover them.
 
 ## Known limitations
 
-- **No Quest build is possible in this environment.** Unity 6000.0.81f1 offers the
-  Android module for Linux only as a macOS `.pkg`; there is no Linux archive, and
-  there is no `adb` and no headset here. The Quest target is fully configured and
-  scripted (see **[QUEST.md](QUEST.md)**), but the APK has never been built or run.
-  All desktop numbers above are mono, desktop-GPU numbers and say **nothing** about
-  Quest performance.
+- **The Quest APK builds, but has never run on a headset.** It is built on Linux
+  and verified structurally with `aapt2`/`apksigner` (arm64-v8a, Vulkan,
+  `libopenxr_loader.so`, `com.oculus.intent.category.VR`, minSdk 32, valid
+  signature, `supportedDevices` includes `eureka` = Quest 3), and the splat sort
+  kernel `InitDeviceRadixSort` is present in the shipped assets. What is untested
+  is **on-device behaviour and frame rate** — there is no headset here. All
+  desktop numbers above are mono, desktop-GPU numbers and say **nothing** about
+  Quest performance. See **[QUEST.md](QUEST.md)**.
+- **Unity's Android module *is* installable on Linux**, despite the release
+  metadata listing it as a macOS `.pkg`. A `.pkg` is an xar archive and Unity Hub
+  merely extracts its payload; every sub-component is a real linux-x64 build.
+  `tools/install-android-module.py` does this without Hub.
 - **722k splats is a frame-time problem on Quest, not a memory one.** 163 MB against
   8 GB of shared memory is comfortable; sorting that many Gaussians twice per frame
   at 72 fps is not. `HouseScanLoader` caps mobile loads at 400k splats
