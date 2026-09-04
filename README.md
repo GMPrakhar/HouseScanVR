@@ -105,8 +105,13 @@ rendering is correct in stereo.
 Assets/Scripts/HouseScanLoader.cs      Player-facing "drop your scan here" entry point
 Assets/Scripts/ScanLevelAnalyzer.cs    Scan -> floor, occupancy grid, spawn points
 Assets/Scripts/ScanPlayerRig.cs        VR/desktop rig constrained to captured floor
+Assets/Scripts/ScanNavGrid.cs          Clearance, connected regions, A*, line of sight
+Assets/Scripts/HunterBrain.cs          Patrol/chase/search AI, no Unity dependencies
+Assets/Scripts/GameDirector.cs         Round loop and hunter spawning
 Assets/Editor/ProjectSetup.cs          Headless URP + scene construction
 Assets/Editor/RenderProbe.cs           The GPU test harness described above
+Assets/Editor/NavProbe.cs              Navigation and AI assertions (no GPU needed)
+Assets/Editor/GameProbe.cs             Drives a real round headlessly at 72 Hz
 Assets/Editor/XrSetup.cs               Mock HMD registration + Windows stereo player
 Assets/Editor/QuestBuild.cs            Quest/OpenXR configuration and APK build
 Assets/Scripts/StereoProbe.cs          Runtime stereo assertions inside a built player
@@ -119,6 +124,9 @@ Packages/org.nesnausk.gaussian-splatting/   Vendored MIT package (upstream 2c6fe
   Runtime/GaussianSplatRuntimeBuilder.cs    Added: in-memory splats -> GPU asset
   Runtime/GaussianSplatAsset.cs             Modified: assets without editor blobs
 
+tools/nav-probe.sh                     Run the navigation assertions
+tools/game-probe.sh                    Run a full round headlessly
+tools/record-flythrough.sh             Render the flythrough video
 tools/make_house_splat.py              Ground-truth scan generator
 ```
 
@@ -241,6 +249,81 @@ These cost real time to diagnose; do not rediscover them.
   `XRSettings.eyeTextureWidth`, so single-pass instanced would break.
 
 
+## Navigation and AI
+
+A walkable grid is not a game. `ScanNavGrid` turns the analysed scan into
+something an agent can use:
+
+- **Clearance** — Chebyshev distance to the nearest blocked cell, by multi-source
+  BFS. A cell is *navigable* only if `clearance >= ceil(agentRadius / cellSize)`,
+  so a body actually fits. Walkable and navigable are not the same thing, and
+  conflating them is how agents end up inside walls.
+- **Connected regions** — flood fill, so "can A reach B" is answered before A* is
+  ever run, and so hunters are never spawned somewhere they cannot leave.
+- **A\*** — 8-connected, octile heuristic, corner cutting disallowed, with a
+  clearance penalty so routes drift to the middle of a corridor instead of
+  scraping the walls. Paths are then string-pulled.
+- **Line of sight** — separate from movement. Cells are only sight-blocking if
+  their splats reach above 1.2 m, so an 0.85 m couch blocks a body but not a
+  view, while a 2.6 m wall blocks both.
+
+`HunterBrain` patrols until it sees the player, chases while it can, and searches
+the last known position after losing them. It is a plain C# class with no Unity
+object dependencies and a seeded RNG, so a full chase can be simulated headlessly
+and asserted rather than eyeballed in a headset.
+
+### The test that matters
+
+`tools/nav-probe.sh` runs the same checks against two scans that differ **only**
+in whether the rooms have doorways — the sealed file is byte-identical to the
+original scan before the doors were cut. With doorways: one connected region, and
+a route that crosses the dividing wall only where the door is. Sealed: three
+regions, no route, and a hunter that never arrives.
+
+That A/B is the point. A pathfinder that quietly ignored geometry would sail
+through the first test.
+
+`tools/game-probe.sh` then drives the real thing: `HouseScanLoader.Load()`, the
+`onScanReady` handshake, spawn selection, and `GameDirector.Tick()` stepped at
+72 Hz until capture. Neither probe needs a GPU.
+
+### Six bugs these caught
+
+Worth recording, because every one of them looked correct while reading it.
+
+Three let agents pass through walls:
+
+1. A "close enough to the waypoint" tolerance that skipped the agent onto a
+   segment nothing had checked.
+2. An unchecked first segment. `path[0]` is the centre of the agent's cell, not
+   where the agent is standing, so the step to `path[1]` needs its own test.
+3. The traversal check itself point-sampled the line, which misses a cell the
+   segment only clips at a corner. Replaced with exact Amanatides & Woo DDA.
+
+Off-grid steps went 16 → 2 → 0.
+
+The other three were one assumption: *the player is standing on a navigable
+cell*. In VR they are not — they stand against a wall, or inside the half-metre
+the agent radius carves around a table.
+
+4. Spawn selection compared regions using the player's cell, which is `-1` when
+   the player is off-grid, so no spawn matched and the round silently refused to
+   start.
+5. Hunters pathed to the player's exact position, which fails for an off-grid
+   goal, so they gave up and wandered.
+6. With both fixed the player was still invincible: the nearest cell a hunter
+   could reach was 1.07 m away and the catch radius is 0.70 m. A hunter that has
+   reached the closest ground it can stand on, and can see the player, now counts
+   as a catch.
+
+### Limits
+
+At 0.25 m cells a 1 m doorway is only about three free cells wide, so furniture
+within half a metre of a door erodes it shut and splits the house in two. This
+happened during development — a couch parked beside the bedroom door — and it
+will happen on real scans.
+
+
 ## Recording a video
 
 `tools/record-flythrough.sh` renders a two-shot flythrough headless (Xvfb + Vulkan) through
@@ -268,5 +351,7 @@ python3 tools/make_house_splat.py --out scans/house_cutaway.ply --no-ceiling
 2. Validate against a real phone capture, which will settle the coordinate
    convention question and expose real-world scan noise.
 3. Install Android Build Support and measure actual on-device frame times.
-4. Build the game on top: the level primitives (floor, walkable grid, spawns) are
-   in place and tested.
+4. Hunters exist but are untuned: speeds, counts and sight range have never been
+   judged by a human, only asserted by a probe.
+5. Nothing about the game loop has been seen in a headset. Everything above is
+   desktop, monoscopic, and headless.
