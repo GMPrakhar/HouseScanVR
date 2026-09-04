@@ -46,6 +46,8 @@ namespace HouseScan
         Transform m_ViewRoot;
 
         public IReadOnlyList<HunterBrain> hunters => m_Hunters;
+        /// The capsule stand-ins, exposed so tooling can recolour or replace them.
+        public IReadOnlyList<Transform> hunterViews => m_Views;
 
         void OnEnable()
         {
@@ -219,7 +221,7 @@ namespace HouseScan
             foreach (var v in m_Views)
             {
                 if (v != null)
-                    Destroy(v.gameObject);
+                    DestroySafely(v.gameObject);
             }
             m_Views.Clear();
         }
@@ -237,7 +239,7 @@ namespace HouseScan
             // source of truth for where a hunter may be.
             var col = go.GetComponent<Collider>();
             if (col != null)
-                Destroy(col);
+                DestroySafely(col);
 
             var mr = go.GetComponent<MeshRenderer>();
             if (mr != null)
@@ -249,6 +251,17 @@ namespace HouseScan
 
         /// Primitives default to the built-in pipeline's material, which renders
         /// magenta under URP, so build an explicit unlit one.
+        /// <summary>
+        /// Object.Destroy is rejected outside play mode, which matters because
+        /// the video recorder and probes drive rounds from the editor.
+        /// </summary>
+        static void DestroySafely(Object o)
+        {
+            if (o == null) return;
+            if (Application.isPlaying) Destroy(o);
+            else DestroyImmediate(o);
+        }
+
         static Material HunterMaterial()
         {
             if (s_HunterMaterial != null)

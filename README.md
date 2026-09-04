@@ -324,25 +324,43 @@ happened during development — a couch parked beside the bedroom door — and i
 will happen on real scans.
 
 
-## Recording a video
+## Recording videos
 
-`tools/record-flythrough.sh` renders a two-shot flythrough headless (Xvfb + Vulkan) through
-the same renderer the Quest build ships, then encodes it with ffmpeg:
+Every feature gets its own short clip, recorded from the running build. The
+point is that the page shows what the code does now, not what it did when
+someone last remembered to re-record.
 
 ```
-tools/record-flythrough.sh [scan.ply] [output.mp4]
+tools/record-all-videos.sh            # every shot
+FLY_SHOT=hunt tools/record-flythrough.sh   # just one
 ```
 
-It records a ceiling-cutaway orbit followed by an eye-height walkthrough that follows the
-walkable cells the analyser derived from the splats, and fails the run if the captured frames
-turn out to be empty. The result is **desktop, mono footage** - it demonstrates the renderer
-and the level analysis, not headset frame rate.
+| Shot | Shows |
+| --- | --- |
+| `tour` | Ceiling-cutaway orbit, then an eye-height walkthrough following walkable cells |
+| `hunt` | Four rounds from overhead: hunters spawn, path through the doorway and close in |
 
-Generate the test captures it uses with:
+Both run the real `GaussianSplatRenderer` under Xvfb with Vulkan, so the footage
+comes from the same renderer the Quest build ships. It is still desktop and
+monoscopic, and says nothing about headset frame rate.
+
+**Each shot asserts something about its own footage.** Six hundred black frames
+encode into a perfectly valid video, so `tour` fails the run if splat coverage
+never exceeds 2%, and `hunt` fails if the agents never appear — the splat pass
+composites over the scene, and a hunter video showing no hunters is worse than
+no video, because it looks like it worked. The agents are magenta specifically
+because the scan contains cream, brown, red and green, and a red capsule cannot
+be told from the sofa by a pixel count.
+
+Adding a shot means adding a case to `FlythroughRecorder` and a line to
+`record-all-videos.sh`.
+
+### Regenerating the test scans
 
 ```
 python3 tools/make_house_splat.py --out scans/house_doors.ply
 python3 tools/make_house_splat.py --out scans/house_cutaway.ply --no-ceiling
+python3 tools/make_house_splat.py --out scans/house_sealed.ply   --no-doors   # negative control
 ```
 
 ## Next steps

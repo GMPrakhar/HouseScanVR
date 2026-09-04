@@ -218,7 +218,12 @@ namespace HouseScan
             if (m_RuntimeAsset == null)
                 return;
             m_RuntimeAsset.DisposeRuntimeData();
-            Destroy(m_RuntimeAsset);
+            // Object.Destroy is rejected outside play mode and does nothing, so
+            // loading a second scan from editor tooling would leak the first.
+            if (Application.isPlaying)
+                Destroy(m_RuntimeAsset);
+            else
+                DestroyImmediate(m_RuntimeAsset);
             m_RuntimeAsset = null;
         }
 

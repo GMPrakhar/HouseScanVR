@@ -59,6 +59,18 @@ namespace HouseScan.EditorTools
             cam.farClipPlane = 200f;
 
             var state = new CaptureState { outDir = outDir };
+            string shot = System.Environment.GetEnvironmentVariable("FLY_SHOT") ?? "tour";
+            Debug.Log($"[Fly] shot={shot}");
+
+            if (shot == "hunt")
+            {
+                // The hunt shot needs the ceiling off to see anything at all.
+                if (!LoadScan(loader, string.IsNullOrEmpty(cutawayPath) ? scanPath : cutawayPath))
+                    return;
+                RecordHunt(cam, loader, state, fps);
+                Finish(state, loader, fps, outDir, shot);
+                return;
+            }
 
             // Pass 1: cutaway orbit. Falls back to the main scan if no cutaway
             // was supplied, rather than silently skipping the shot.
@@ -104,7 +116,14 @@ namespace HouseScan.EditorTools
                 Debug.Log($"[Fly] walk done, {state.index} frames total");
             }
 
+            Finish(state, loader, fps, outDir, shot);
+        }
+
+        static void Finish(CaptureState state, HouseScanLoader loader, int fps,
+                           string outDir, string shot)
+        {
             var summary =
+                $"shot={shot}\n" +
                 $"frames={state.index}\n" +
                 $"fps={fps}\n" +
                 $"resolution={kWidth}x{kHeight}\n" +
@@ -115,6 +134,8 @@ namespace HouseScan.EditorTools
                 $"max_coverage={state.maxCoverage.ToString("F3", CultureInfo.InvariantCulture)}\n" +
                 $"mean_coverage={(state.sumCoverage / Mathf.Max(1, state.coverageSamples)).ToString("F3", CultureInfo.InvariantCulture)}\n" +
                 $"mean_render_ms={(state.totalMs / Mathf.Max(1, state.rendered)).ToString("F2", CultureInfo.InvariantCulture)}\n";
+            if (state.measureAgents)
+                summary += $"max_agent_pixels={state.maxAgentPixels.ToString("F4", CultureInfo.InvariantCulture)}\n";
             File.WriteAllText(Path.Combine(outDir, "flythrough.txt"), summary);
             Debug.Log("[Fly] " + summary.Replace("\n", " "));
 
@@ -128,7 +149,216 @@ namespace HouseScan.EditorTools
                 return;
             }
 
+            // Same argument for the agents: the splat pass composites over the
+            // scene, and a video of hunters that shows no hunters is worse than
+            // no video, because it looks like it worked.
+            if (state.measureAgents && state.maxAgentPixels < 0.0004f)
+            {
+                Debug.LogError($"[Fly] agents are not visible in any sampled frame " +
+                               $"(max {state.maxAgentPixels:P3} of pixels); the splat " +
+                               $"composite is probably drawing over them");
+                EditorApplication.Exit(1);
+                return;
+            }
+
             EditorApplication.Exit(0);
+        }
+
+        /// <summary>
+        /// Records an actual round: GameDirector spawns hunters, HunterBrain
+        /// chases a fleeing player, and both leave a trail of markers so the
+        /// routes through doorways are legible from overhead.
+        /// </summary>
+        // The scan has cream walls, a brown floor, a red sofa and a green plant,
+        // so red capsules are both hard to pick out and impossible to measure
+        // separately from the furniture. Magenta appears nowhere in a house.
+        static readonly Color kHunterColour = new Color(1.00f, 0.10f, 0.85f);
+        static readonly Color kPlayerColour = new Color(0.25f, 0.85f, 1.00f);
+
+        static void RecordHunt(Camera cam, HouseScanLoader loader, CaptureState st, int fps)
+        {
+            st.measureAgents = true;
+
+            var director = loader.gameObject.GetComponent<GameDirector>();
+            if (director == null)
+                director = loader.gameObject.AddComponent<GameDirector>();
+            director.m_Loader = loader;
+            director.m_Rig = null;
+            director.m_HunterCount = 3;
+            director.m_BeginOnScanReady = false;
+            director.m_SpawnOutOfSight = true;
+
+            var playerGo = new GameObject("PlayerMarker");
+            var nav0 = ScanNavGrid.Build(loader.analysis, director.m_AgentRadius);
+            if (!nav0.TrySnap(new Vector3(-1.5f, 0f, 0f), out var start))
+            {
+                Debug.LogError("[Fly] no navigable start for the player");
+                EditorApplication.Exit(1);
+                return;
+            }
+            director.transform.position = start;
+
+            if (!director.BeginRound())
+            {
+                Debug.LogError("[Fly] BeginRound failed; nothing to record");
+                EditorApplication.Exit(1);
+                return;
+            }
+            var nav = director.nav;
+            Debug.Log($"[Fly] hunt: {director.hunters.Count} hunters, " +
+                      $"{nav.componentCount} region(s)");
+
+            // Recolour the director's stand-in capsules so they read against the
+            // scan and can be counted in the captured pixels.
+            foreach (var v in director.hunterViews)
+            {
+                var mr = v == null ? null : v.GetComponent<MeshRenderer>();
+                if (mr != null) mr.sharedMaterial = UnlitMaterial(kHunterColour);
+            }
+
+            MakeMarker(playerGo, kPlayerColour, 0.5f, 0.9f);
+            playerGo.transform.position = start + Vector3.up * 0.9f;
+
+            var trailRoot = new GameObject("Trails").transform;
+            var a = loader.analysis;
+            var b = loader.scanBounds;
+            var centre = new Vector3(b.center.x, a.floorY, b.center.z);
+
+            // High and angled rather than straight down: a pure top-down view of
+            // a splat cloud reads as coloured noise, while a tilt keeps the walls
+            // recognisable as walls.
+            float radius = Mathf.Max(b.size.x, b.size.z) * 0.40f;
+            WarmUp(cam, centre + Vector3.back * radius + Vector3.up * 8f, centre);
+
+            Vector3 playerPos = start;
+            int frames = fps * 14;
+            int frame = 0;
+            float simTime = 0f;
+            float caughtAt = -1f;
+            int rounds = 1;
+
+            Capture(cam, st, frames,
+                t =>
+                {
+                    // Drift slowly around the house so the shot is not static,
+                    // but stay near overhead so the routes stay readable.
+                    float ang = (250f + 55f * t) * Mathf.Deg2Rad;
+                    var p = centre + new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * radius;
+                    p.y = a.floorY + Mathf.Lerp(8.2f, 7.0f, t);
+                    return (p, centre);
+                },
+                _ =>
+                {
+                    float dt = 1f / fps;
+                    simTime += dt;
+
+                    // A round ends in a few seconds, so hold briefly on the
+                    // capture and then start another: three short rounds show
+                    // respawning and different routes, where one round would
+                    // leave ten seconds of frozen scene.
+                    if (director.isCaught)
+                    {
+                        if (caughtAt < 0f) caughtAt = simTime;
+                        else if (simTime - caughtAt > 0.8f)
+                        {
+                            foreach (Transform old in trailRoot)
+                                Object.DestroyImmediate(old.gameObject);
+                            playerPos = start;
+                            director.transform.position = start;
+                            director.BeginRound();
+                            foreach (var v in director.hunterViews)
+                            {
+                                var r = v == null ? null : v.GetComponent<MeshRenderer>();
+                                if (r != null) r.sharedMaterial = UnlitMaterial(kHunterColour);
+                            }
+                            caughtAt = -1f;
+                            rounds++;
+                        }
+                    }
+                    else
+                    {
+                        playerPos = Flee(nav, director, playerPos, dt);
+                    }
+                    playerGo.transform.position = playerPos + Vector3.up * 0.9f;
+                    director.transform.position = playerPos;
+                    director.Tick(dt);
+
+                    // A marker every few frames, so the paths accumulate into
+                    // visible trails instead of vanishing with the agents.
+                    if (frame % 4 == 0)
+                    {
+                        DropTrail(trailRoot, playerPos, kPlayerColour);
+                        foreach (var h in director.hunters)
+                            DropTrail(trailRoot, h.position, kHunterColour);
+                    }
+                    frame++;
+                });
+
+            Debug.Log($"[Fly] hunt done: {rounds} round(s) in {simTime:F1}s simulated, " +
+                      $"agent pixels max {st.maxAgentPixels:P3}");
+        }
+
+        static Renderer MakeMarker(GameObject go, Color colour, float width, float height)
+        {
+            var body = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+            body.transform.SetParent(go.transform, false);
+            body.transform.localScale = new Vector3(width, height, width);
+            var col = body.GetComponent<Collider>();
+            if (col != null) Object.DestroyImmediate(col);
+            var mr = body.GetComponent<MeshRenderer>();
+            mr.sharedMaterial = UnlitMaterial(colour);
+            return mr;
+        }
+
+        static void DropTrail(Transform root, Vector3 at, Color colour)
+        {
+            var dot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            dot.transform.SetParent(root, worldPositionStays: true);
+            dot.transform.position = new Vector3(at.x, at.y + 0.06f, at.z);
+            dot.transform.localScale = Vector3.one * 0.16f;
+            var col = dot.GetComponent<Collider>();
+            if (col != null) Object.DestroyImmediate(col);
+            dot.GetComponent<MeshRenderer>().sharedMaterial = UnlitMaterial(colour * 0.85f);
+        }
+
+        static readonly Dictionary<Color, Material> s_Materials = new();
+
+        static Material UnlitMaterial(Color colour)
+        {
+            if (s_Materials.TryGetValue(colour, out var cached))
+                return cached;
+            var shader = Shader.Find("Universal Render Pipeline/Unlit")
+                         ?? Shader.Find("Unlit/Color");
+            var m = new Material(shader);
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", colour);
+            if (m.HasProperty("_Color")) m.SetColor("_Color", colour);
+            s_Materials[colour] = m;
+            return m;
+        }
+
+        /// <summary>Moves the player away from the nearest hunter, sliding along
+        /// walls rather than pressing into them.</summary>
+        static Vector3 Flee(ScanNavGrid nav, GameDirector director, Vector3 p, float dt)
+        {
+            float step = 1.7f * dt;
+            Vector3 away = Vector3.zero;
+            float nearest = float.MaxValue;
+            foreach (var h in director.hunters)
+            {
+                float d = Vector3.Distance(h.position, p);
+                if (d < nearest) { nearest = d; away = p - h.position; }
+            }
+            if (away.sqrMagnitude < 1e-6f) return p;
+            away.y = 0f;
+            away.Normalize();
+
+            for (int i = 0; i < 10; ++i)
+            {
+                float deg = (i + 1) / 2 * 40f * (i % 2 == 0 ? 1f : -1f);
+                var next = p + (Quaternion.Euler(0f, deg, 0f) * away) * step;
+                if (nav.CorridorClear(p, next)) return next;
+            }
+            return p;
         }
 
         class CaptureState
@@ -139,6 +369,12 @@ namespace HouseScan.EditorTools
             public double totalMs;
             public float maxCoverage, sumCoverage;
             public int coverageSamples;
+
+            /// Fraction of pixels matching the hunter colour, sampled per shot.
+            /// The splat pass composites over the scene, so "are the agents
+            /// actually visible?" has to be measured, not assumed.
+            public float maxAgentPixels;
+            public bool measureAgents;
         }
 
         static bool LoadScan(HouseScanLoader loader, string path)
@@ -156,11 +392,17 @@ namespace HouseScan.EditorTools
         }
 
         static void Capture(Camera cam, CaptureState st, int frames,
-                            System.Func<float, (Vector3 pos, Vector3 look)> path)
+                            System.Func<float, (Vector3 pos, Vector3 look)> path,
+                            System.Action<float> stepSimulation = null)
         {
             for (int f = 0; f < frames; ++f)
             {
                 float t = frames <= 1 ? 0f : f / (float)(frames - 1);
+
+                // Advance the simulation before positioning the camera, so the
+                // frame shows the state the camera is framed for.
+                stepSimulation?.Invoke(1f / Mathf.Max(1, frames));
+
                 var (pos, look) = path(t);
 
                 cam.transform.position = pos;
@@ -197,14 +439,24 @@ namespace HouseScan.EditorTools
 
                 if (st.index % 15 == 0)
                 {
-                    int lit = 0;
+                    int lit = 0, agent = 0;
                     var px = tex.GetPixels();
                     foreach (var c in px)
+                    {
                         if (c.r + c.g + c.b > 0.12f) lit++;
+                        // Magenta: high red and blue, low green. The scan's
+                        // palette (cream, brown, red, green) contains nothing
+                        // like it, so this counts agents and not furniture.
+                        if (st.measureAgents && c.r > 0.45f && c.b > 0.40f &&
+                            c.r - c.g > 0.25f && c.b - c.g > 0.22f) agent++;
+                    }
                     float cov = lit / (float)px.Length;
                     st.maxCoverage = Mathf.Max(st.maxCoverage, cov);
                     st.sumCoverage += cov;
                     st.coverageSamples++;
+                    if (st.measureAgents)
+                        st.maxAgentPixels = Mathf.Max(st.maxAgentPixels,
+                                                      agent / (float)px.Length);
                 }
 
                 Object.DestroyImmediate(tex);

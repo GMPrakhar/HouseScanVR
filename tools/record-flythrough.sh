@@ -5,16 +5,22 @@
 # the footage comes from the same renderer the Quest build ships -- but it is
 # desktop, mono footage and says nothing about headset frame rate.
 #
+# Each feature gets its own short video, selected by FLY_SHOT:
+#   tour   cutaway orbit + eye-height walkthrough of the scan  (default)
+#   hunt   a real round: hunters spawn, path and chase, seen from overhead
+#
 # Usage: tools/record-flythrough.sh [scan.ply] [output.mp4]
+#        FLY_SHOT=hunt tools/record-flythrough.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNITY="${UNITY:-$HOME/unity/editor/6000.0.81f1/Editor/Unity}"
 SCAN="${1:-$HOME/vr-work/scans/house_doors.ply}"
 CUTAWAY="${FLY_SCAN_CUTAWAY:-$HOME/vr-work/scans/house_cutaway.ply}"
-OUT_MP4="${2:-$ROOT/Build/Media/housescan-flythrough.mp4}"
+SHOT="${FLY_SHOT:-tour}"
+OUT_MP4="${2:-$ROOT/Build/Media/housescan-$SHOT.mp4}"
 
-FRAMES_DIR="${FLY_OUT:-/tmp/housescan-flythrough}"
+FRAMES_DIR="${FLY_OUT:-/tmp/housescan-$SHOT}"
 FPS="${FLY_FPS:-30}"
 
 [ -x "$UNITY" ] || { echo "Unity not found at $UNITY (set UNITY=...)" >&2; exit 1; }
@@ -24,8 +30,8 @@ command -v ffmpeg >/dev/null || { echo "ffmpeg not installed" >&2; exit 1; }
 rm -rf "$FRAMES_DIR"
 mkdir -p "$FRAMES_DIR" "$(dirname "$OUT_MP4")"
 
-LOG="$ROOT/Build/Media/flythrough.log"
-echo "Rendering frames (this takes a few minutes)..."
+LOG="$ROOT/Build/Media/$SHOT.log"
+echo "Rendering '$SHOT' frames (this takes a few minutes)..."
 
 # Xvfb + Vulkan: the splat renderer needs real compute, which the null device
 # used by plain -batchmode does not provide.
@@ -35,6 +41,7 @@ xvfb-run -a --server-args="-screen 0 1920x1080x24" \
       FLY_SCAN_CUTAWAY="$CUTAWAY" \
       FLY_OUT="$FRAMES_DIR" \
       FLY_FPS="$FPS" \
+      FLY_SHOT="$SHOT" \
   "$UNITY" \
     -batchmode -nographics=false -force-vulkan \
     -projectPath "$ROOT" \
@@ -56,9 +63,12 @@ ffmpeg -y -loglevel error \
   -movflags +faststart \
   "$OUT_MP4"
 
-# Poster frame for the web page, taken from partway through the orbit.
+# Poster frame for the web page. The hunt shot needs a later frame, since the
+# trails that make it legible have not been drawn yet at the start.
 POSTER="${OUT_MP4%.mp4}.jpg"
-ffmpeg -y -loglevel error -i "$OUT_MP4" -ss 2 -frames:v 1 -q:v 3 "$POSTER"
+POSTER_AT=2
+[ "$SHOT" = "hunt" ] && POSTER_AT=9
+ffmpeg -y -loglevel error -i "$OUT_MP4" -ss "$POSTER_AT" -frames:v 1 -q:v 3 "$POSTER"
 
 echo
 echo "Video:  $OUT_MP4"
