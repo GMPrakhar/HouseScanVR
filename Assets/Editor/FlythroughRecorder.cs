@@ -97,9 +97,22 @@ namespace HouseScan.EditorTools
             if (!LoadScan(loader, scanPath)) return;
             {
                 var a = loader.analysis;
-                var route = BuildRoute(a, loader.spawnPoints);
+                var walkNav = ScanNavGrid.Build(a, 0.30f);
+                var route = BuildRoute(a, loader.spawnPoints, walkNav);
+                float routeLength = RouteLength(route);
                 Debug.Log($"[Fly] walk route has {route.Count} waypoints, " +
-                          $"walkable {a.WalkableAreaSqm:F1} m^2");
+                          $"{routeLength:F1} m long, walkable {a.WalkableAreaSqm:F1} m^2");
+
+                // A short route means the camera shuffles on the spot for
+                // thirteen seconds, which is how a rearranged sofa quietly
+                // turned the tour into a circle around the living room.
+                if (routeLength < 12f)
+                {
+                    Debug.LogError($"[Fly] walk route is only {routeLength:F1} m; " +
+                                   $"the tour would not leave one room");
+                    EditorApplication.Exit(1);
+                    return;
+                }
 
                 WarmUp(cam, route[0], route[Mathf.Min(1, route.Count - 1)]);
 
@@ -108,7 +121,7 @@ namespace HouseScan.EditorTools
                     var p = SampleRoute(route, t);
                     // Look ahead along the route so the camera turns into
                     // doorways rather than sliding sideways through them.
-                    var ahead = SampleRoute(route, Mathf.Min(1f, t + 0.03f));
+                    var ahead = SampleRoute(route, Mathf.Min(1f, t + 0.06f));
                     if ((ahead - p).sqrMagnitude < 1e-4f)
                         ahead = p + Vector3.forward;
                     return (p, new Vector3(ahead.x, p.y, ahead.z));
@@ -497,37 +510,97 @@ namespace HouseScan.EditorTools
         /// only hops whose straight segment stays inside walkable cells. Without
         /// that check the camera cuts through walls between rooms.
         /// </summary>
-        static List<Vector3> BuildRoute(ScanLevelAnalysis a, List<Vector3> spawns)
+        /// <summary>
+        /// Builds the walkthrough route by pathfinding, not by guessing.
+        ///
+        /// The previous version chained the nearest spawn point that was
+        /// reachable in a straight line and stopped as soon as none was, so
+        /// moving one piece of furniture silently shortened the tour to a
+        /// circle around the sofa. Picking spread-out waypoints and running A*
+        /// between them means the camera walks through doorways for the same
+        /// reason the hunters do.
+        /// </summary>
+        static List<Vector3> BuildRoute(ScanLevelAnalysis a, List<Vector3> spawns,
+                                        ScanNavGrid nav)
         {
             float eye = a.floorY + 1.55f;
-            var pending = new List<Vector3>();
-            foreach (var s in spawns)
-                pending.Add(new Vector3(s.x, eye, s.z));
 
-            if (pending.Count == 0)
-                pending.Add(new Vector3(a.bounds.center.x, eye, a.bounds.center.z));
-
-            var route = new List<Vector3> { pending[0] };
-            pending.RemoveAt(0);
-
-            while (pending.Count > 0)
+            // Prefer stops with room around them. A spawn point only needs to
+            // fit an agent, so it can sit half a metre from a wall - fine to
+            // stand on, but the camera then arrives nose-first into plaster.
+            var candidates = new List<Vector3>();
+            var tight = new List<Vector3>();
+            foreach (var sp in spawns)
             {
-                var cur = route[route.Count - 1];
-                int best = -1;
-                float bestD = float.MaxValue;
-                for (int i = 0; i < pending.Count; ++i)
+                if (!nav.TrySnap(sp, out var ok)) continue;
+                if (nav.ComponentAt(ok) != nav.largestComponent) continue;
+                if (nav.analysis.TryWorldToCell(ok, out int cx, out int cz) &&
+                    nav.clearance[cz * nav.width + cx] >= nav.minClearanceCells + 2)
+                    candidates.Add(ok);
+                else
+                    tight.Add(ok);
+            }
+            if (candidates.Count < 2)
+                candidates.AddRange(tight);
+
+            if (candidates.Count < 2)
+            {
+                Debug.LogWarning("[Fly] too few navigable spawn points for a tour route");
+                var c = new Vector3(a.bounds.center.x, eye, a.bounds.center.z);
+                return new List<Vector3> { c, c };
+            }
+
+            // Farthest-point sampling: repeatedly take the candidate furthest
+            // from everything chosen so far, so the waypoints spread across the
+            // house instead of clustering in the largest room.
+            var stops = new List<Vector3> { candidates[0] };
+            int wanted = Mathf.Min(4, candidates.Count);
+            while (stops.Count < wanted)
+            {
+                Vector3 best = default;
+                float bestD = -1f;
+                foreach (var c in candidates)
                 {
-                    if (!SegmentWalkable(a, cur, pending[i]))
-                        continue;
-                    float d = (pending[i] - cur).sqrMagnitude;
-                    if (d < bestD) { bestD = d; best = i; }
+                    float nearest = float.MaxValue;
+                    foreach (var chosen in stops)
+                        nearest = Mathf.Min(nearest, Vector3.SqrMagnitude(c - chosen));
+                    if (nearest > bestD) { bestD = nearest; best = c; }
                 }
-                if (best < 0)
-                    break; // nothing else reachable without crossing a wall
-                route.Add(pending[best]);
-                pending.RemoveAt(best);
+                if (bestD <= 0f) break;
+                stops.Add(best);
+            }
+
+            var route = new List<Vector3>();
+            var leg = new List<Vector3>();
+            for (int i = 1; i < stops.Count; ++i)
+            {
+                if (!nav.TryFindPath(stops[i - 1], stops[i], leg) || leg.Count == 0)
+                {
+                    Debug.LogWarning($"[Fly] no path between tour stops {i - 1} and {i}");
+                    continue;
+                }
+                foreach (var p in leg)
+                {
+                    var at = new Vector3(p.x, eye, p.z);
+                    if (route.Count == 0 || (route[route.Count - 1] - at).sqrMagnitude > 1e-4f)
+                        route.Add(at);
+                }
+            }
+
+            if (route.Count < 2)
+            {
+                var c = new Vector3(a.bounds.center.x, eye, a.bounds.center.z);
+                route = new List<Vector3> { c, c + Vector3.forward };
             }
             return route;
+        }
+
+        static float RouteLength(List<Vector3> route)
+        {
+            float total = 0f;
+            for (int i = 1; i < route.Count; ++i)
+                total += Vector3.Distance(route[i - 1], route[i]);
+            return total;
         }
 
         static bool SegmentWalkable(ScanLevelAnalysis a, Vector3 from, Vector3 to)
