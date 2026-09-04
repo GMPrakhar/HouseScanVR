@@ -55,7 +55,14 @@ class SplatBuilder:
         self.op = []
 
     def add_plane(self, origin, u, v, normal, count, colour, roughness=0.012,
-                  jitter=0.008):
+                  jitter=0.008, holes=None):
+        """Scatters splats over a parallelogram.
+
+        ``holes`` is a list of (u0, u1, v0, v1) rectangles in normalised plane
+        coordinates; samples landing inside one are dropped. This is how door
+        openings are cut, so the rooms form one connected walkable space rather
+        than a set of sealed boxes.
+        """
         origin = np.asarray(origin, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
         v = np.asarray(v, dtype=np.float64)
@@ -68,6 +75,16 @@ class SplatBuilder:
 
         a = self.rng.random(count)
         b = self.rng.random(count)
+
+        if holes:
+            keep = np.ones(count, dtype=bool)
+            for u0, u1, v0, v1 in holes:
+                keep &= ~((a >= u0) & (a <= u1) & (b >= v0) & (b <= v1))
+            a, b = a[keep], b[keep]
+            count = int(keep.sum())
+            if count == 0:
+                return
+
         pts = origin + a[:, None] * u + b[:, None] * v
         pts = pts + normal[None, :] * self.rng.normal(0.0, jitter, size=(count, 1))
 
@@ -104,10 +121,17 @@ class SplatBuilder:
         return len(self.pos)
 
 
-def build_house(rng, density):
-    """Two rooms plus a hallway - whole-house scale capture."""
+def build_house(rng, density, ceilings=True):
+    """Two rooms plus a hallway, connected by doorways - whole-house scale.
+
+    Doorways matter: without them each room is a sealed box, the walkable
+    analysis finds three disconnected islands, and any walkthrough camera has
+    to pass straight through a wall.
+    """
     b = SplatBuilder(rng)
     H = 2.6
+    # Doorways run from the floor to 80% of wall height.
+    DOOR_V = (0.0, 0.80)
 
     rooms = [
         ("living", -4.0, -3.0, 7.0, 6.0),
@@ -115,20 +139,35 @@ def build_house(rng, density):
         ("hall", -1.0, 3.0, 3.0, 3.5),
     ]
 
+    # Door openings, in normalised coordinates of the wall they are cut into.
+    # living<->bedroom at x=3 spanning z=-1.5..-0.5; living<->hall at z=3
+    # spanning x=0..1.
+    holes = {
+        ("living", "east"):  [(0.250, 0.4167) + DOOR_V],
+        ("bedroom", "west"): [(0.375, 0.625) + DOOR_V],
+        ("living", "north"): [(0.5714, 0.7143) + DOOR_V],
+        ("hall", "south"):   [(0.3333, 0.6667) + DOOR_V],
+    }
+
     for name, x0, z0, w, d in rooms:
         b.add_plane((x0, 0.0, z0), (w, 0, 0), (0, 0, d), (0, 1, 0),
                     w * d * density, PALETTE["floor"])
-        b.add_plane((x0, H, z0), (w, 0, 0), (0, 0, d), (0, -1, 0),
-                    w * d * density * 0.6, PALETTE["ceiling"])
+        if ceilings:
+            b.add_plane((x0, H, z0), (w, 0, 0), (0, 0, d), (0, -1, 0),
+                        w * d * density * 0.6, PALETTE["ceiling"])
         b.add_plane((x0, 0, z0), (w, 0, 0), (0, H, 0), (0, 0, -1),
-                    w * H * density, PALETTE["wall"])
+                    w * H * density, PALETTE["wall"],
+                    holes=holes.get((name, "south")))
         b.add_plane((x0, 0, z0 + d), (w, 0, 0), (0, H, 0), (0, 0, 1),
-                    w * H * density, PALETTE["wall"])
+                    w * H * density, PALETTE["wall"],
+                    holes=holes.get((name, "north")))
         b.add_plane((x0, 0, z0), (0, 0, d), (0, H, 0), (-1, 0, 0),
-                    d * H * density, PALETTE["wall"])
+                    d * H * density, PALETTE["wall"],
+                    holes=holes.get((name, "west")))
         east_colour = PALETTE["wall_e"] if name == "living" else PALETTE["wall"]
         b.add_plane((x0 + w, 0, z0), (0, 0, d), (0, H, 0), (1, 0, 0),
-                    d * H * density, east_colour)
+                    d * H * density, east_colour,
+                    holes=holes.get((name, "east")))
 
     b.add_box((-2.0, 0.42, 0.0), (2.0, 0.85, 0.9), PALETTE["couch"], density * 1.4)
     b.add_box((0.6, 0.36, 0.2), (1.1, 0.72, 0.7), PALETTE["table"], density * 1.4)
@@ -178,10 +217,12 @@ def main():
     ap.add_argument("--density", type=float, default=2500.0,
                     help="splats per square metre of surface")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--no-ceiling", action="store_true",
+                    help="omit ceilings, for a cutaway view of the floor plan")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    b = build_house(rng, args.density)
+    b = build_house(rng, args.density, ceilings=not args.no_ceiling)
     n = write_ply(args.out, b)
     p = np.asarray(b.pos)
     print(f"wrote {args.out}: {n} splats")

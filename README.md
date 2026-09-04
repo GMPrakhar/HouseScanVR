@@ -240,6 +240,28 @@ These cost real time to diagnose; do not rediscover them.
   cannot be measured here. Multi-pass is required — upstream only consults
   `XRSettings.eyeTextureWidth`, so single-pass instanced would break.
 
+
+## Recording a video
+
+`tools/record-flythrough.sh` renders a two-shot flythrough headless (Xvfb + Vulkan) through
+the same renderer the Quest build ships, then encodes it with ffmpeg:
+
+```
+tools/record-flythrough.sh [scan.ply] [output.mp4]
+```
+
+It records a ceiling-cutaway orbit followed by an eye-height walkthrough that follows the
+walkable cells the analyser derived from the splats, and fails the run if the captured frames
+turn out to be empty. The result is **desktop, mono footage** - it demonstrates the renderer
+and the level analysis, not headset frame rate.
+
+Generate the test captures it uses with:
+
+```
+python3 tools/make_house_splat.py --out scans/house_doors.ply
+python3 tools/make_house_splat.py --out scans/house_cutaway.ply --no-ceiling
+```
+
 ## Next steps
 
 1. Compressed/chunked encoding, to fit a house in a Quest memory budget.
