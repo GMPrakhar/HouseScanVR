@@ -16,6 +16,11 @@ namespace HouseScan
     public class GameDirector : MonoBehaviour
     {
         public HouseScanLoader m_Loader;
+
+        /// Optional alternative level source, such as a RoomMappingSession.
+        /// When set it takes precedence over the scan loader, so a house mapped
+        /// in the headset plays exactly like one loaded from a .ply.
+        public MonoBehaviour m_LevelSource;
         public ScanPlayerRig m_Rig;
 
         [Tooltip("How many hunters to place at the start of a round.")]
@@ -46,6 +51,20 @@ namespace HouseScan
         Transform m_ViewRoot;
 
         public IReadOnlyList<HunterBrain> hunters => m_Hunters;
+
+        public ILevelSource source
+        {
+            get
+            {
+                // Compare the MonoBehaviour references, not the interface ones:
+                // a destroyed or unassigned Unity object is only null through
+                // its own equality operator, which an interface-typed reference
+                // bypasses.
+                if (m_LevelSource != null && m_LevelSource is ILevelSource s)
+                    return s;
+                return m_Loader != null ? m_Loader : null;
+            }
+        }
         /// The capsule stand-ins, exposed so tooling can recolour or replace them.
         public IReadOnlyList<Transform> hunterViews => m_Views;
 
@@ -73,13 +92,17 @@ namespace HouseScan
         /// </summary>
         public bool BeginRound()
         {
-            if (m_Loader == null || m_Loader.analysis == null)
+            var level = source;
+            if (level == null || level.analysis == null)
             {
-                Debug.LogWarning("[Game] No analysed scan; cannot start a round.");
+                Debug.LogWarning("[Game] No level yet: load a scan, or map a room first.");
                 return false;
             }
 
-            nav = ScanNavGrid.Build(m_Loader.analysis, m_AgentRadius);
+            // The level gets to narrow the agents if its own geometry is only
+            // trustworthy at a smaller radius; see ILevelSource.agentRadius.
+            float radius = level.agentRadius > 0f ? level.agentRadius : m_AgentRadius;
+            nav = ScanNavGrid.Build(level.analysis, radius);
             if (nav.largestComponent < 0)
             {
                 Debug.LogWarning("[Game] Scan has no navigable space; is the capture " +
@@ -181,7 +204,7 @@ namespace HouseScan
                 playerComponent = nav.largestComponent;
 
             var candidates = new List<Vector3>();
-            foreach (var s in m_Loader.spawnPoints)
+            foreach (var s in source.spawnPoints)
             {
                 // Only spawn hunters that can actually reach the player. One
                 // sealed off in another room is just a decoration.

@@ -8,6 +8,7 @@
 # Each feature gets its own short video, selected by FLY_SHOT:
 #   tour   cutaway orbit + eye-height walkthrough of the scan  (default)
 #   hunt   a real round: hunters spawn, path and chase, seen from overhead
+#   map    mapping a house by walking it, then playing the map that results
 #
 # Usage: tools/record-flythrough.sh [scan.ply] [output.mp4]
 #        FLY_SHOT=hunt tools/record-flythrough.sh
@@ -68,6 +69,9 @@ ffmpeg -y -loglevel error \
 POSTER="${OUT_MP4%.mp4}.jpg"
 POSTER_AT=2
 [ "$SHOT" = "hunt" ] && POSTER_AT=9
+# The map shot starts on bare floor, so its poster has to come from late on,
+# once enough of the house has been walked to be recognisable.
+[ "$SHOT" = "map" ] && POSTER_AT=12
 ffmpeg -y -loglevel error -i "$OUT_MP4" -ss "$POSTER_AT" -frames:v 1 -q:v 3 "$POSTER"
 
 echo

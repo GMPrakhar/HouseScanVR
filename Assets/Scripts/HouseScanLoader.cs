@@ -15,7 +15,7 @@ namespace HouseScan
     /// the asset having been imported in the editor.
     /// </summary>
     [RequireComponent(typeof(GaussianSplatRenderer))]
-    public class HouseScanLoader : MonoBehaviour
+    public class HouseScanLoader : MonoBehaviour, ILevelSource
     {
         [Tooltip("Absolute path, or a file name resolved against the scans folder.")]
         public string m_ScanPath = "house.ply";
@@ -65,6 +65,11 @@ namespace HouseScan
 
         /// Spawn positions on the floor, spread across the walkable area.
         public List<Vector3> spawnPoints { get; private set; } = new();
+
+        IReadOnlyList<Vector3> ILevelSource.spawnPoints => spawnPoints;
+
+        // A scan measures the whole room, so a person-sized agent is fine.
+        float ILevelSource.agentRadius => 0f;
 
         /// Raised once the scan is loaded and analysed, so gameplay can start.
         public event System.Action<HouseScanLoader> onScanReady;

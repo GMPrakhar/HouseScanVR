@@ -108,10 +108,17 @@ Assets/Scripts/ScanPlayerRig.cs        VR/desktop rig constrained to captured fl
 Assets/Scripts/ScanNavGrid.cs          Clearance, connected regions, A*, line of sight
 Assets/Scripts/HunterBrain.cs          Patrol/chase/search AI, no Unity dependencies
 Assets/Scripts/GameDirector.cs         Round loop and hunter spawning
+Assets/Scripts/ILevelSource.cs         What a playable level is, whatever produced it
+Assets/Scripts/RoomMapper.cs           Walked poses -> occupancy grid, walls vs furniture
+Assets/Scripts/RoomMappingSession.cs   The mapping state machine; an ILevelSource
+Assets/Scripts/RoomMappingFlow.cs      Controller input: press A, walk, press A
+Assets/Scripts/MappedFloorView.cs      The floor lighting up as you walk it
 Assets/Editor/ProjectSetup.cs          Headless URP + scene construction
 Assets/Editor/RenderProbe.cs           The GPU test harness described above
 Assets/Editor/NavProbe.cs              Navigation and AI assertions (no GPU needed)
 Assets/Editor/GameProbe.cs             Drives a real round headlessly at 72 Hz
+Assets/Editor/MapProbe.cs              Walks a simulated player and grades the map
+Assets/Editor/WalkRoutes.cs            Coverage walks through a scan, for tests and film
 Assets/Editor/XrSetup.cs               Mock HMD registration + Windows stereo player
 Assets/Editor/QuestBuild.cs            Quest/OpenXR configuration and APK build
 Assets/Scripts/StereoProbe.cs          Runtime stereo assertions inside a built player
@@ -126,6 +133,7 @@ Packages/org.nesnausk.gaussian-splatting/   Vendored MIT package (upstream 2c6fe
 
 tools/nav-probe.sh                     Run the navigation assertions
 tools/game-probe.sh                    Run a full round headlessly
+tools/map-probe.sh                     Grade walk-mapping against the scan
 tools/record-flythrough.sh             Render the flythrough video
 tools/make_house_splat.py              Ground-truth scan generator
 ```
@@ -324,6 +332,95 @@ happened during development — a couch parked beside the bedroom door — and i
 will happen on real scans.
 
 
+## Mapping a house from inside the game
+
+Playing in your own home used to mean scanning it in Polycam or Scaniverse,
+exporting a `.ply`, plugging in a USB cable and copying the file into a folder
+whose name you had to type. That is homework, not a game. The app now maps the
+house itself.
+
+Press **A**, walk around your home, and the floor you cover lights up under you
+(`MappedFloorView` draws it as a single rebuilt mesh, not one object per cell —
+a mapped house is thousands of cells and a Quest will not spend thousands of
+draw calls on a progress indicator). Press **A** again and the space you walked
+becomes the level. It saves to `Application.persistentDataPath`, so it is a
+thing you do once.
+
+The reason this works is that **floor you have physically stood on is the
+strongest possible evidence that floor is walkable** — stronger than anything
+inferred from a point cloud. `RoomMapper` claims nothing else: precision against
+the scan of the same house is 100%.
+
+### How the pieces fit
+
+`ILevelSource` is what made this cheap. `ScanLevelAnalysis` was already a plain
+data class, so anything that can produce one gets navigation, hunters and the
+round loop for free:
+
+| Source | Produces | Agent radius |
+| --- | --- | --- |
+| `HouseScanLoader` | Analysis of a `.ply` splat scan | default (0.30 m) |
+| `RoomMappingSession` | Analysis of the floor the player walked | 0.20 m |
+
+The agent radius is part of the interface because a level is not just a shape —
+it comes with a statement about how much of it is trustworthy. A scan measures
+whole rooms. A walked map only knows about the strip of floor the player's body
+swept, roughly 0.70 m wide, so its agents have to be *narrower than the person
+who mapped it* or they will not fit down the corridors that walking proved were
+passable. Getting this wrong was not subtle: with person-sized agents the mapped
+house fell into **nine disconnected regions** and spawn points collapsed to four,
+one of them a metre from the player. With the radius the level actually
+supports, it is **one region of 526 cells** and 16 spawn points.
+
+### Verifying it without a headset
+
+`tools/map-probe.sh` walks a simulated player through the synthetic house and
+feeds the poses they would generate to `RoomMapper`. The splat scan of the same
+house is then the ground truth — an independent description of the same
+building, from geometry rather than from footsteps.
+
+| Check | Result |
+| --- | --- |
+| Floor claimed that the scan agrees is walkable | 100% of 526 cells |
+| Floor the player's body covered that the map recorded | 98.3% |
+| Connected regions in the result | 1 |
+| Real walls that still block sight | 99.5% of 184 |
+| A full round on the mapped level | hunters spawn 5.6 m away, navigate 4.9 m, catch in 4.5 s |
+| Headset carried at hip height across the room | 201 samples rejected, zero floor added |
+| Mapping only part of the house | smaller level, zero floor claimed where nobody walked |
+
+The negative controls are the interesting half. A headset taken off and carried
+would otherwise paint walkable floor straight through walls, so poses outside a
+0.9–2.3 m head height are dropped. And mapping one third of the route must
+produce a level under three quarters the size, with *no* cell claimed more than
+0.6 m from a pose — otherwise the map is guessing, and a guess here is a wall
+the hunters can walk through.
+
+### What it gets wrong, and one idea that failed
+
+Walking tells you where the floor is, not what the gaps are. A sofa you walked
+around and a partition wall with a corridor either side are indistinguishable
+from footsteps. So `ClassifyUnwalked` errs deliberately: unwalked space
+connected to the outside blocks sight, enclosed pockets do not. About 1 wall
+cell in 200 ends up see-through; roughly half of furniture is treated as the
+edge of the map, which costs the player sightlines rather than handing the
+hunters any.
+
+The obvious fix — morphologically closing the walked set first, so a room
+circled rather than crossed fills in — was implemented and then **measured and
+removed**:
+
+| `indoorReach` | Real walls still blocking sight | Furniture correctly seen over |
+| --- | --- | --- |
+| 0.25 m | 99.5% | 49.1% |
+| 0.75 m | 94.0% | 49.1% |
+| 1.25 m | 90.8% | 49.1% |
+| 1.75 m | 89.1% | 49.1% |
+
+It is a straight loss: the furniture number never moves, because a trail already
+encloses whatever it encloses. The sweep still runs in `MapProbe` so the
+decision can be re-checked rather than taken on trust.
+
 ## Recording videos
 
 Every feature gets its own short clip, recorded from the running build. The
@@ -339,8 +436,9 @@ FLY_SHOT=hunt tools/record-flythrough.sh   # just one
 | --- | --- |
 | `tour` | Ceiling-cutaway orbit, then an eye-height walkthrough following walkable cells |
 | `hunt` | Four rounds from overhead: hunters spawn, path through the doorway and close in |
+| `map` | A house being mapped on foot, then hunters spawning onto the map that was just made |
 
-Both run the real `GaussianSplatRenderer` under Xvfb with Vulkan, so the footage
+All three run the real `GaussianSplatRenderer` under Xvfb with Vulkan, so the footage
 comes from the same renderer the Quest build ships. It is still desktop and
 monoscopic, and says nothing about headset frame rate.
 
@@ -350,7 +448,18 @@ never exceeds 2%, and `hunt` fails if the agents never appear — the splat pass
 composites over the scene, and a hunter video showing no hunters is worse than
 no video, because it looks like it worked. The agents are magenta specifically
 because the scan contains cream, brown, red and green, and a red capsule cannot
-be told from the sofa by a pixel count.
+be told from the sofa by a pixel count. `map` goes further and asserts the map
+*grows*: marked pixels must end at least four times where they started, because
+a clip of an already-finished map would encode just as cleanly as the real
+thing.
+
+Recording the `map` shot found a bug that had been in the `hunt` shot all along.
+`GameDirector` uses its own transform as the player position when there is no
+rig, and both shots had attached it to the loader's GameObject — so moving the
+player dragged the entire splat cloud around the world with it. On the hunt shot
+the drift was small enough to look like nothing; on the map shot the mapped
+floor visibly tore away from the house. Both now put the director on its own
+object.
 
 Adding a shot means adding a case to `FlythroughRecorder` and a line to
 `record-all-videos.sh`.
@@ -373,3 +482,8 @@ python3 tools/make_house_splat.py --out scans/house_sealed.ply   --no-doors   # 
    judged by a human, only asserted by a probe.
 5. Nothing about the game loop has been seen in a headset. Everything above is
    desktop, monoscopic, and headless.
+6. Walk-mapping is verified against a simulated walk. How tiring it is to map a
+   real house on foot, and whether people bother, only real hardware will say.
+7. Meta's Scene API already knows where the walls are. Walk-mapping was built
+   first because it is testable here and Scene API is not, but the two should
+   probably be combined: the Scene API for walls, footsteps for floor.

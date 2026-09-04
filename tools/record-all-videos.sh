@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SHOTS="${*:-tour hunt}"
+SHOTS="${*:-tour hunt map}"
 
 for shot in $SHOTS; do
   echo "=== $shot ==="

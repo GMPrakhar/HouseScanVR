@@ -112,6 +112,24 @@ namespace HouseScan.EditorTools
             director.m_Loader = loader;
             director.m_Rig = rig;
 
+            // Mapping by walking is the default way in. A pre-scanned .ply is
+            // still loaded if one is present, but nobody has to produce one.
+            var mapGo = new GameObject("RoomMapping");
+            var session = mapGo.AddComponent<RoomMappingSession>();
+            session.m_Rig = rig;
+
+            var floorGo = new GameObject("MappedFloor");
+            floorGo.AddComponent<MeshFilter>();
+            floorGo.AddComponent<MeshRenderer>();
+            var floorView = floorGo.AddComponent<MappedFloorView>();
+            floorView.m_Session = session;
+
+            var flow = mapGo.AddComponent<RoomMappingFlow>();
+            flow.m_Rig = rig;
+            flow.m_Session = session;
+            flow.m_FloorView = floorView;
+            flow.m_Director = director;
+
             EditorSceneManager.SaveScene(scene, kScenePath);
             Debug.Log($"[Setup] Scene written to {kScenePath}");
         }

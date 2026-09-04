@@ -62,6 +62,15 @@ namespace HouseScan.EditorTools
             string shot = System.Environment.GetEnvironmentVariable("FLY_SHOT") ?? "tour";
             Debug.Log($"[Fly] shot={shot}");
 
+            if (shot == "map")
+            {
+                if (!LoadScan(loader, string.IsNullOrEmpty(cutawayPath) ? scanPath : cutawayPath))
+                    return;
+                RecordMapping(cam, loader, state, fps);
+                Finish(state, loader, fps, outDir, shot);
+                return;
+            }
+
             if (shot == "hunt")
             {
                 // The hunt shot needs the ceiling off to see anything at all.
@@ -187,14 +196,18 @@ namespace HouseScan.EditorTools
         // separately from the furniture. Magenta appears nowhere in a house.
         static readonly Color kHunterColour = new Color(1.00f, 0.10f, 0.85f);
         static readonly Color kPlayerColour = new Color(0.25f, 0.85f, 1.00f);
+        // Shares the hunters' magenta so the same pixel test measures it.
+        static readonly Color kMappedColour = new Color(0.85f, 0.10f, 0.75f);
 
         static void RecordHunt(Camera cam, HouseScanLoader loader, CaptureState st, int fps)
         {
             st.measureAgents = true;
 
-            var director = loader.gameObject.GetComponent<GameDirector>();
-            if (director == null)
-                director = loader.gameObject.AddComponent<GameDirector>();
+            // On its own object, never the loader's. GameDirector uses its own
+            // transform as the player position when there is no rig, so putting
+            // it on the loader would drag the entire splat cloud around the
+            // world every time the player moved.
+            var director = new GameObject("Director").AddComponent<GameDirector>();
             director.m_Loader = loader;
             director.m_Rig = null;
             director.m_HunterCount = 3;
@@ -311,6 +324,175 @@ namespace HouseScan.EditorTools
                       $"agent pixels max {st.maxAgentPixels:P3}");
         }
 
+        /// <summary>
+        /// Records the in-app mapping flow: a player walks their house and the
+        /// floor they cover lights up behind them, building the level as they
+        /// go. The last few seconds start a round on the result, so the shot
+        /// shows the map being made and then played.
+        /// </summary>
+        static void RecordMapping(Camera cam, HouseScanLoader loader, CaptureState st, int fps)
+        {
+            st.measureAgents = true;
+
+            var a = loader.analysis;
+            var nav = ScanNavGrid.Build(a, 0.30f);
+
+            // A coverage walk, not the camera tour: someone mapping their house
+            // walks into the corners and back out again, and the tour route is
+            // far too short to map anything with.
+            var route = WalkRoutes.Cover(a, nav, 14);
+            float routeLength = WalkRoutes.Length(route);
+            if (routeLength < 40f)
+            {
+                Debug.LogError($"[Fly] mapping walk is only {routeLength:F1} m; " +
+                               $"too short to map a house with");
+                EditorApplication.Exit(1);
+                return;
+            }
+            Debug.Log($"[Fly] map: walking {routeLength:F1} m over {route.Count} waypoints");
+
+            var session = loader.gameObject.GetComponent<RoomMappingSession>();
+            if (session == null) session = loader.gameObject.AddComponent<RoomMappingSession>();
+            session.m_LoadOnStart = false;
+            session.m_CellSize = a.cellSize;
+            session.BeginMapping(a.floorY);
+
+            var playerGo = new GameObject("Mapper");
+            MakeMarker(playerGo, kPlayerColour, 0.5f, 0.9f);
+
+            var tileRoot = new GameObject("MappedFloor").transform;
+            var painted = new HashSet<long>();
+
+            var b = loader.scanBounds;
+            var centre = new Vector3(b.center.x, a.floorY, b.center.z);
+
+            // Further out and higher than the hunt shot, and drifting less. The
+            // subject here is the whole floor plan filling in, so the house has
+            // to stay inside the frame for the entire shot rather than only at
+            // the start.
+            float radius = Mathf.Max(b.size.x, b.size.z) * 0.60f;
+            WarmUp(cam, centre + Vector3.back * radius + Vector3.up * 10f, centre);
+
+            // Two thirds mapping, one third playing what was mapped.
+            int frames = fps * 18;
+            int mapFrames = (frames * 2) / 3;
+            int frame = 0;
+            GameDirector director = null;
+            Vector3 playerPos = route[0];
+
+            Capture(cam, st, frames,
+                t =>
+                {
+                    float ang = (255f + 35f * t) * Mathf.Deg2Rad;
+                    var p = centre + new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * radius;
+                    p.y = a.floorY + Mathf.Lerp(10.5f, 9.5f, t);
+                    return (p, centre);
+                },
+                _ =>
+                {
+                    float dt = 1f / fps;
+
+                    if (frame < mapFrames)
+                    {
+                        // Walk the route at a steady pace, sampling the headset
+                        // exactly as the real session does.
+                        float u = frame / (float)(mapFrames - 1);
+                        playerPos = WalkRoutes.Sample(route, u);
+                        session.Sample(new Vector3(playerPos.x, a.floorY + 1.65f, playerPos.z));
+                        PaintMapped(session, tileRoot, painted, a.floorY);
+                        playerGo.transform.position =
+                            new Vector3(playerPos.x, a.floorY, playerPos.z) + Vector3.up * 0.9f;
+                    }
+                    else if (director == null)
+                    {
+                        if (!session.FinishMapping())
+                        {
+                            Debug.LogError($"[Fly] mapping did not finish: {session.lastError}");
+                            EditorApplication.Exit(1);
+                            return;
+                        }
+                        // Its own object: the director's transform is the
+                        // player, and the loader's transform is the house.
+                        director = new GameObject("Director").AddComponent<GameDirector>();
+                        director.m_Loader = null;
+                        director.m_LevelSource = session;
+                        director.m_Rig = null;
+                        director.m_HunterCount = 3;
+                        director.m_BeginOnScanReady = false;
+                        director.transform.position = session.spawnPoints[0];
+                        playerPos = session.spawnPoints[0];
+
+                        if (!director.BeginRound())
+                        {
+                            Debug.LogError("[Fly] BeginRound failed on the mapped level");
+                            EditorApplication.Exit(1);
+                            return;
+                        }
+                        foreach (var v in director.hunterViews)
+                        {
+                            var mr = v == null ? null : v.GetComponent<MeshRenderer>();
+                            if (mr != null) mr.sharedMaterial = UnlitMaterial(kHunterColour);
+                        }
+                        Debug.Log($"[Fly] map: {session.mappedAreaSqm:F1} m² mapped, " +
+                                  $"{director.hunters.Count} hunters now playing it");
+                    }
+                    else
+                    {
+                        if (!director.isCaught)
+                            playerPos = Flee(director.nav, director, playerPos, dt);
+                        playerGo.transform.position = playerPos + Vector3.up * 0.9f;
+                        director.transform.position = playerPos;
+                        director.Tick(dt);
+                    }
+                    frame++;
+                });
+
+            // The whole point of the shot is that the map grows, so a still
+            // image of a finished map would be a failed recording even though
+            // it would encode perfectly well.
+            // The comparison is against the very first sampled frame, not an
+            // average over the opening third: by a third of the way in the
+            // player is already well into the walk, and averaging there made a
+            // map that quadrupled in size look like it had barely moved.
+            int n = st.agentSeries.Count;
+            float start = n > 0 ? st.agentSeries[0] : 0f;
+            float late = 0f;
+            for (int i = n - n / 3; i < n; ++i) late += st.agentSeries[i];
+            late /= Mathf.Max(1, n / 3);
+            Debug.Log($"[Fly] map done: {session.mappedAreaSqm:F1} m² over " +
+                      $"{n} samples, marked pixels start={start:P3} end={late:P3}");
+            if (n < 6 || late < Mathf.Max(0.004f, start * 4f))
+            {
+                Debug.LogError($"[Fly] the mapped area does not visibly grow " +
+                               $"(start {start:P3}, end {late:P3})");
+                EditorApplication.Exit(1);
+            }
+        }
+
+        /// <summary>Lays a tile on every newly mapped cell, so the level appears
+        /// under the player as they walk.</summary>
+        static void PaintMapped(RoomMappingSession session, Transform root,
+                                HashSet<long> painted, float floorY)
+        {
+            var mapper = session.mapper;
+            if (mapper == null) return;
+            foreach (var cell in mapper.VisitedCells())
+            {
+                long key = ((long)cell.x << 32) ^ (uint)cell.z;
+                if (!painted.Add(key)) continue;
+                var q = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                q.transform.SetParent(root, worldPositionStays: true);
+                q.transform.position = new Vector3((cell.x + 0.5f) * mapper.cellSize,
+                                                   floorY + 0.04f,
+                                                   (cell.z + 0.5f) * mapper.cellSize);
+                q.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+                q.transform.localScale = Vector3.one * mapper.cellSize * 0.92f;
+                var col = q.GetComponent<Collider>();
+                if (col != null) Object.DestroyImmediate(col);
+                q.GetComponent<MeshRenderer>().sharedMaterial = UnlitMaterial(kMappedColour);
+            }
+        }
+
         static Renderer MakeMarker(GameObject go, Color colour, float width, float height)
         {
             var body = GameObject.CreatePrimitive(PrimitiveType.Capsule);
@@ -388,6 +570,10 @@ namespace HouseScan.EditorTools
             /// actually visible?" has to be measured, not assumed.
             public float maxAgentPixels;
             public bool measureAgents;
+            /// Every sampled agent-pixel fraction, in order. A shot that is
+            /// supposed to show something appearing over time can check that it
+            /// grew, rather than only that it was there at some point.
+            public readonly List<float> agentSeries = new();
         }
 
         static bool LoadScan(HouseScanLoader loader, string path)
@@ -468,8 +654,11 @@ namespace HouseScan.EditorTools
                     st.sumCoverage += cov;
                     st.coverageSamples++;
                     if (st.measureAgents)
-                        st.maxAgentPixels = Mathf.Max(st.maxAgentPixels,
-                                                      agent / (float)px.Length);
+                    {
+                        float frac = agent / (float)px.Length;
+                        st.maxAgentPixels = Mathf.Max(st.maxAgentPixels, frac);
+                        st.agentSeries.Add(frac);
+                    }
                 }
 
                 Object.DestroyImmediate(tex);
