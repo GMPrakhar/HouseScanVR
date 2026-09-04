@@ -110,8 +110,31 @@ namespace HouseScan
 
             Advance(dt);
 
-            if (Vector3.Distance(Flat(position), Flat(target)) <= catchRadius)
+            if (IsCatch(target, nav, sees))
                 hasCaughtTarget = true;
+        }
+
+        /// <summary>
+        /// Normally a catch is simply closing to <see cref="catchRadius"/>.
+        ///
+        /// A scanned house needs one extra case. The player physically stands
+        /// where they like, including spots the grid calls unreachable - wedged
+        /// in a corner the agent-radius erosion closed off, or leaning over a
+        /// table. A hunter can then stand right next to them, in plain sight,
+        /// forever, and the player is invincible. So if the target is not on
+        /// navigable ground, the hunter has reached the nearest ground that is,
+        /// and it can see them, that counts.
+        /// </summary>
+        bool IsCatch(Vector3 target, ScanNavGrid nav, bool sees)
+        {
+            if (Vector3.Distance(Flat(position), Flat(target)) <= catchRadius)
+                return true;
+
+            if (!sees || nav.IsNavigable(target))
+                return false;
+
+            return nav.TrySnap(target, out var reachable) &&
+                   Vector3.Distance(Flat(position), Flat(reachable)) <= catchRadius;
         }
 
         bool HasPath => m_PathIndex < m_Path.Count;
@@ -130,6 +153,14 @@ namespace HouseScan
         bool TryRepath(Vector3 goal, ScanNavGrid nav)
         {
             repathCount++;
+
+            // The player is frequently not standing on a navigable cell: right up
+            // against a wall, or within the agent radius of furniture. Pathing to
+            // their exact position would simply fail and the hunter would give up
+            // and wander, so aim at the closest cell that can actually be stood on.
+            if (!nav.IsNavigable(goal) && nav.TrySnap(goal, out var reachable))
+                goal = reachable;
+
             var fresh = new List<Vector3>();
             if (!nav.TryFindPath(position, goal, fresh) || fresh.Count == 0)
             {

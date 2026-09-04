@@ -108,16 +108,26 @@ namespace HouseScan
 
         void Update()
         {
+            Tick(Time.deltaTime);
+        }
+
+        /// <summary>
+        /// Advances the round by <paramref name="dt"/> seconds. Update() just
+        /// forwards Time.deltaTime; keeping the step explicit lets the round be
+        /// driven at a fixed rate from a headless test.
+        /// </summary>
+        public void Tick(float dt)
+        {
             if (!isRoundActive || isCaught)
                 return;
 
             var player = PlayerPosition();
-            survivalSeconds += Time.deltaTime;
+            survivalSeconds += dt;
 
             for (int i = 0; i < m_Hunters.Count; ++i)
             {
                 var h = m_Hunters[i];
-                h.Tick(Time.deltaTime, player, nav);
+                h.Tick(dt, player, nav);
 
                 var view = m_Views[i];
                 if (view != null)
@@ -157,13 +167,30 @@ namespace HouseScan
             if (nav == null)
                 return chosen;
 
+            // The player's real position is wherever they physically stood, which
+            // is regularly not a navigable cell: pressed against a wall, inside
+            // the radius of a table, or a little off from where tracking thinks
+            // the floor is. Snap first, and fall back to the largest region,
+            // otherwise the component test matches nothing and no hunters spawn.
+            int playerComponent = nav.ComponentAt(player);
+            if (playerComponent < 0 && nav.TrySnap(player, out var onGrid))
+                playerComponent = nav.ComponentAt(onGrid);
+            if (playerComponent < 0)
+                playerComponent = nav.largestComponent;
+
             var candidates = new List<Vector3>();
             foreach (var s in m_Loader.spawnPoints)
             {
+                // Only spawn hunters that can actually reach the player. One
+                // sealed off in another room is just a decoration.
                 if (nav.TrySnap(s, out var snapped) &&
-                    nav.ComponentAt(snapped) == nav.ComponentAt(player))
+                    nav.ComponentAt(snapped) == playerComponent)
                     candidates.Add(snapped);
             }
+
+            if (candidates.Count == 0)
+                Debug.LogWarning("[Game] No spawn point shares the player's navigable " +
+                                 "region; the scan may be fragmented.");
 
             // Farthest first, so hunters start spread across the house.
             candidates.Sort((a, b) =>

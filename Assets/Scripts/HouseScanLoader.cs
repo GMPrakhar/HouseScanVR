@@ -191,6 +191,22 @@ namespace HouseScan
             var renderer = GetComponent<GaussianSplatRenderer>();
             DisposeRuntimeAsset();
             m_RuntimeAsset = asset;
+
+            // The splat renderer sorts on the GPU, so it cannot initialise without
+            // compute support. That is the normal case in a -nographics batch run,
+            // where we only want the derived level data; loading should still
+            // succeed rather than drown the log in kernel errors.
+            bool headless = SystemInfo.graphicsDeviceType ==
+                            UnityEngine.Rendering.GraphicsDeviceType.Null;
+            if (renderer == null || headless || !SystemInfo.supportsComputeShaders)
+            {
+                if (renderer != null)
+                    renderer.enabled = false;
+                Debug.Log("[HouseScanLoader] No compute shader support; scan loaded for " +
+                          "analysis only, not rendered.");
+                return;
+            }
+
             renderer.m_Asset = asset;
             // Force the renderer to rebuild its GPU resources for the new asset.
             renderer.enabled = false;
