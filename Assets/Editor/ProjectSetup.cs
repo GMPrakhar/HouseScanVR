@@ -107,6 +107,11 @@ namespace HouseScan.EditorTools
             rig.m_Loader = loader;
             rig.m_Camera = cam;
 
+            var gameGo = new GameObject("GameDirector");
+            var director = gameGo.AddComponent<GameDirector>();
+            director.m_Loader = loader;
+            director.m_Rig = rig;
+
             EditorSceneManager.SaveScene(scene, kScenePath);
             Debug.Log($"[Setup] Scene written to {kScenePath}");
         }

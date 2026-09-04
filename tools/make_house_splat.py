@@ -121,7 +121,7 @@ class SplatBuilder:
         return len(self.pos)
 
 
-def build_house(rng, density, ceilings=True):
+def build_house(rng, density, ceilings=True, doors=True):
     """Two rooms plus a hallway, connected by doorways - whole-house scale.
 
     Doorways matter: without them each room is a sealed box, the walkable
@@ -142,7 +142,7 @@ def build_house(rng, density, ceilings=True):
     # Door openings, in normalised coordinates of the wall they are cut into.
     # living<->bedroom at x=3 spanning z=-1.5..-0.5; living<->hall at z=3
     # spanning x=0..1.
-    holes = {
+    holes = {} if not doors else {
         ("living", "east"):  [(0.250, 0.4167) + DOOR_V],
         ("bedroom", "west"): [(0.375, 0.625) + DOOR_V],
         ("living", "north"): [(0.5714, 0.7143) + DOOR_V],
@@ -172,7 +172,10 @@ def build_house(rng, density, ceilings=True):
     b.add_box((-2.0, 0.42, 0.0), (2.0, 0.85, 0.9), PALETTE["couch"], density * 1.4)
     b.add_box((0.6, 0.36, 0.2), (1.1, 0.72, 0.7), PALETTE["table"], density * 1.4)
     b.add_box((-3.4, 0.55, 2.0), (0.5, 1.1, 0.5), PALETTE["plant"], density * 1.4)
-    b.add_box((4.2, 0.30, -1.4), (1.6, 0.6, 2.0), PALETTE["couch"], density * 1.4)
+    # Kept clear of the x=3 doorway: at x 3.4 this bed sat directly against the
+    # opening and eroded the door to a single navigable cell, which made the
+    # bedroom unreachable.
+    b.add_box((5.8, 0.30, -1.6), (1.6, 0.6, 1.6), PALETTE["couch"], density * 1.4)
     return b
 
 
@@ -219,10 +222,13 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--no-ceiling", action="store_true",
                     help="omit ceilings, for a cutaway view of the floor plan")
+    ap.add_argument("--no-doors", action="store_true",
+                    help="seal every room, as a negative control for pathfinding")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    b = build_house(rng, args.density, ceilings=not args.no_ceiling)
+    b = build_house(rng, args.density, ceilings=not args.no_ceiling,
+                    doors=not args.no_doors)
     n = write_ply(args.out, b)
     p = np.asarray(b.pos)
     print(f"wrote {args.out}: {n} splats")

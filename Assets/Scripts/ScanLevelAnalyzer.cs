@@ -23,6 +23,10 @@ namespace HouseScan
         public int[] obstacleCounts;
         /// Splat count per cell within the floor slab.
         public int[] floorCounts;
+        /// Splat count per cell in the band above sitting height. Walls reach it;
+        /// a couch or table does not, which is how sight-blocking is told apart
+        /// from merely walk-blocking.
+        public int[] sightBlockCounts;
         public bool[] walkable;
 
         public Vector3 CellToWorld(int x, int z) =>
@@ -55,9 +59,11 @@ namespace HouseScan
         /// <param name="cellSize">Grid resolution in metres.</param>
         /// <param name="floorSlab">Thickness of the band treated as floor.</param>
         /// <param name="clearance">Height band that must be empty to walk.</param>
+        /// <param name="sightHeight">Height above the floor at which an obstacle
+        /// starts to block sight rather than just movement.</param>
         public static ScanLevelAnalysis Analyze(NativeArray<RuntimeSplatData> splats,
             float cellSize = 0.25f, float floorSlab = 0.12f, float clearance = 1.7f,
-            int minFloorSplatsPerCell = 3)
+            int minFloorSplatsPerCell = 3, float sightHeight = 1.2f)
         {
             var result = new ScanLevelAnalysis { cellSize = cellSize };
 
@@ -82,10 +88,12 @@ namespace HouseScan
             result.gridHeight = h;
             result.obstacleCounts = new int[w * h];
             result.floorCounts = new int[w * h];
+            result.sightBlockCounts = new int[w * h];
             result.walkable = new bool[w * h];
 
             float obstacleLo = result.floorY + floorSlab;
             float obstacleHi = result.floorY + clearance;
+            float sightLo = result.floorY + sightHeight;
 
             for (int i = 0; i < splats.Length; ++i)
             {
@@ -99,7 +107,11 @@ namespace HouseScan
                 if (p.y >= result.floorY - floorSlab && p.y <= result.floorY + floorSlab)
                     result.floorCounts[idx]++;
                 else if (p.y > obstacleLo && p.y < obstacleHi)
+                {
                     result.obstacleCounts[idx]++;
+                    if (p.y >= sightLo)
+                        result.sightBlockCounts[idx]++;
+                }
             }
 
             // A cell is walkable when it has real floor evidence and nothing
